@@ -14,6 +14,16 @@ public class CloudBucketService {
     // carpeta que simula el bucket en la nube
     private final Path carpeta = Paths.get("workspace/store_data/output/bucket/aadtex-daily-reports/2026/09");
 
+    // busca el primer numero libre para no sobrescribir resumenes anteriores
+    public int siguienteId() throws IOException {
+        Files.createDirectories(carpeta);
+        int id = 1;
+        while (Files.exists(carpeta.resolve("summary_batch_" + id + ".json"))) {
+            id++;
+        }
+        return id;
+    }
+
     public Path guardar(String nombre, String json) throws IOException {
         Files.createDirectories(carpeta);
         Path destino = carpeta.resolve(nombre);

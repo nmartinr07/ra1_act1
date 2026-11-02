@@ -36,7 +36,6 @@ public class StoreIngestionScheduler {
 
     private final CryptoService cryptoService;
     private final CloudBucketService bucketService;
-    private int contador = 0;
 
     public StoreIngestionScheduler(CryptoService cryptoService, CloudBucketService bucketService) {
         this.cryptoService = cryptoService;
@@ -46,13 +45,11 @@ public class StoreIngestionScheduler {
     // se ejecuta cada 5 segundos (espera 3 segundos al principio para que el generador termine)
     @Scheduled(initialDelay = 3000, fixedRate = 5000)
     public void processStoreBatches() throws IOException {
-        // creo las carpetas si no existen
         Files.createDirectories(input);
         Files.createDirectories(processed);
         Files.createDirectories(signatures);
         Files.createDirectories(error);
 
-        // guardo los ficheros de input en una lista
         List<Path> ficheros = new ArrayList<>();
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(input)) {
             for (Path p : stream) {
@@ -72,27 +69,34 @@ public class StoreIngestionScheduler {
         }
     }
 
-    private void procesar(Path fichero) throws IOException {
+    private void procesar(Path fichero) {
         String nombre = fichero.getFileName().toString();
+        String minusculas = nombre.toLowerCase();
         try {
-            // fichero vacio
             if (Files.size(fichero) == 0) {
                 moverAError(fichero);
                 return;
             }
 
-            if (nombre.endsWith(".csv")) {
+            if (minusculas.endsWith(".csv")) {
                 procesarCsv(fichero);
-            } else if (nombre.endsWith(".enc")) {
+            } else if (minusculas.endsWith(".enc")) {
                 procesarEnc(fichero);
-            } else if (nombre.endsWith(".zip")) {
+            } else if (minusculas.endsWith(".zip")) {
                 procesarZip(fichero);
-            } else if (nombre.endsWith(".jpg")) {
+            } else if (minusculas.endsWith(".jpg")) {
                 procesarJpg(fichero);
+            } else {
+                log.warn("Fichero ignorado (extension no soportada): {}", nombre);
             }
         } catch (Exception e) {
             log.error("Fallo al procesar {}: {}", nombre, e.getMessage());
-            moverAError(fichero);
+            try {
+                moverAError(fichero);
+            } catch (IOException e2) {
+                // si tampoco se puede mover, lo dejo y sigo con el siguiente fichero
+                log.error("No se pudo mover {} a error: {}", nombre, e2.getMessage());
+            }
         }
     }
 
@@ -114,7 +118,6 @@ public class StoreIngestionScheduler {
 
     private void procesarEnc(Path fichero) throws Exception {
         String nombre = fichero.getFileName().toString();
-        // leo los bytes cifrados y los descifro en memoria
         byte[] cifrado = Files.readAllBytes(fichero);
         byte[] descifrado = cryptoService.decrypt(cifrado);
         BigDecimal total = leerCsv(new ByteArrayInputStream(descifrado), nombre);
@@ -128,10 +131,15 @@ public class StoreIngestionScheduler {
         try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(fichero))) {
             ZipEntry entrada;
             while ((entrada = zip.getNextEntry()) != null) {
-                String nombreEntrada = entrada.getName();
-                if (nombreEntrada.endsWith(".csv")) {
+                if (entrada.isDirectory()) {
+                    continue;
+                }
+                // me quedo solo con el nombre del fichero, sin carpetas ni "../"
+                String nombreEntrada = Paths.get(entrada.getName()).getFileName().toString();
+                String minusculas = nombreEntrada.toLowerCase();
+                if (minusculas.endsWith(".csv")) {
                     total = total.add(leerCsv(zip, nombre + "/" + nombreEntrada));
-                } else if (nombreEntrada.endsWith(".jpg")) {
+                } else if (minusculas.endsWith(".jpg")) {
                     copiar(zip, signatures.resolve(nombreEntrada));
                     log.info("Firma extraida del ZIP: {}", nombreEntrada);
                 }
@@ -180,13 +188,13 @@ public class StoreIngestionScheduler {
     }
 
     private void guardarResumen(String origen, BigDecimal total) throws IOException {
-        contador++;
+        int id = bucketService.siguienteId();
         String json = "{\n"
-                + "  \"batchId\": " + contador + ",\n"
+                + "  \"batchId\": " + id + ",\n"
                 + "  \"sourceFile\": \"" + origen + "\",\n"
                 + "  \"totalSales\": " + total.toPlainString() + "\n"
                 + "}\n";
-        Path ruta = bucketService.guardar("summary_batch_" + contador + ".json", json);
+        Path ruta = bucketService.guardar("summary_batch_" + id + ".json", json);
         log.info("Resumen JSON publicado: {}", ruta);
     }
 }
