@@ -2,6 +2,7 @@ package com.fencgut961.aad;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
@@ -9,7 +10,6 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -19,25 +19,31 @@ public class MultiLanguageDataGenerator implements CommandLineRunner {
     private static final Logger log = LoggerFactory.getLogger(MultiLanguageDataGenerator.class);
 
     private final CryptoService cryptoService;
+    private final Rutas rutas;
+    private final String clave;
 
-    public MultiLanguageDataGenerator(CryptoService cryptoService) {
+    public MultiLanguageDataGenerator(CryptoService cryptoService, Rutas rutas,
+                                      @Value("${store.aes-key}") String clave) {
         this.cryptoService = cryptoService;
+        this.rutas = rutas;
+        this.clave = clave;
     }
 
     @Override
     public void run(String... args) throws Exception {
-        Path input = Paths.get("workspace/store_data/input");
-        Path keys = Paths.get("workspace/store_data/keys");
+        // los datos de prueba se generan de nuevo en cada arranque (lo pide el enunciado)
+        Path input = rutas.input();
+        Path keys = rutas.keys();
         Files.createDirectories(input);
         Files.createDirectories(keys);
-        Files.createDirectories(Paths.get("workspace/store_data/output/processed/signatures"));
-        Files.createDirectories(Paths.get("workspace/store_data/output/error"));
-        Files.createDirectories(Paths.get("workspace/store_data/output/bucket"));
+        Files.createDirectories(rutas.signatures());
+        Files.createDirectories(rutas.error());
+        Files.createDirectories(rutas.bucket());
 
         String cabecera = "StoreID,StoreName,SalesAmount,Category,TransactionDate\n";
 
         // clave
-        Files.writeString(keys.resolve("AadTexSecret.key"), "AadTexSecret2026", StandardCharsets.UTF_8);
+        Files.writeString(keys.resolve("AadTexSecret.key"), clave, StandardCharsets.UTF_8);
 
         // csv de Espana
         String espana = cabecera
