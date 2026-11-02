@@ -2,14 +2,23 @@ package com.fencgut961.aad;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -19,191 +28,165 @@ import java.util.zip.ZipInputStream;
 public class StoreIngestionScheduler {
 
     private static final Logger log = LoggerFactory.getLogger(StoreIngestionScheduler.class);
-    private static final int BUFFER_SIZE = 4096;
+
+    private final Path input = Paths.get("workspace/store_data/input");
+    private final Path processed = Paths.get("workspace/store_data/output/processed");
+    private final Path signatures = Paths.get("workspace/store_data/output/processed/signatures");
+    private final Path error = Paths.get("workspace/store_data/output/error");
 
     private final CryptoService cryptoService;
     private final CloudBucketService bucketService;
-    private final Path input;
-    private final Path processed;
-    private final Path signatures;
-    private final Path error;
-    private int batchCounter = 0;
+    private int contador = 0;
 
-    public StoreIngestionScheduler(CryptoService cryptoService,
-                                   CloudBucketService bucketService,
-                                   @Value("${store.base-path:workspace/store_data}") String basePath) {
+    public StoreIngestionScheduler(CryptoService cryptoService, CloudBucketService bucketService) {
         this.cryptoService = cryptoService;
         this.bucketService = bucketService;
-        Path base = Paths.get(basePath);
-        this.input = base.resolve("input");
-        this.processed = base.resolve("output/processed");
-        this.signatures = base.resolve("output/processed/signatures");
-        this.error = base.resolve("output/error");
     }
 
+    // se ejecuta cada 5 segundos (espera 3 segundos al principio para que el generador termine)
     @Scheduled(initialDelay = 3000, fixedRate = 5000)
-    public void processStoreBatches() {
-        try {
-            Files.createDirectories(input);
-            Files.createDirectories(processed);
-            Files.createDirectories(signatures);
-            Files.createDirectories(error);
+    public void processStoreBatches() throws IOException {
+        // creo las carpetas si no existen
+        Files.createDirectories(input);
+        Files.createDirectories(processed);
+        Files.createDirectories(signatures);
+        Files.createDirectories(error);
 
-            List<Path> files = new ArrayList<>();
-            try (DirectoryStream<Path> stream = Files.newDirectoryStream(input)) {
-                for (Path p : stream) {
-                    if (Files.isRegularFile(p)) files.add(p);
+        // guardo los ficheros de input en una lista
+        List<Path> ficheros = new ArrayList<>();
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(input)) {
+            for (Path p : stream) {
+                if (Files.isRegularFile(p)) {
+                    ficheros.add(p);
                 }
             }
-            if (files.isEmpty()) return;
+        }
 
-            log.info("Escaneando {}: {} fichero(s) encontrados", input, files.size());
-            for (Path file : files) {
-                processFile(file);
-            }
-        } catch (Exception e) {
-            log.error("Error en el ciclo de ingestion", e);
+        if (ficheros.isEmpty()) {
+            return;
+        }
+        log.info("Escaneando {}: {} fichero(s) encontrados", input, ficheros.size());
+
+        for (Path fichero : ficheros) {
+            procesar(fichero);
         }
     }
 
-    private void processFile(Path file) {
-        String name = file.getFileName().toString();
-        String lower = name.toLowerCase();
+    private void procesar(Path fichero) throws IOException {
+        String nombre = fichero.getFileName().toString();
         try {
-            if (Files.size(file) == 0) {
-                moveToError(file);
+            // fichero vacio
+            if (Files.size(fichero) == 0) {
+                moverAError(fichero);
                 return;
             }
-            if (lower.endsWith(".csv")) {
-                processCsv(file);
-            } else if (lower.endsWith(".enc")) {
-                processEnc(file);
-            } else if (lower.endsWith(".zip")) {
-                processZip(file);
-            } else if (lower.endsWith(".jpg")) {
-                copySignature(file);
-            } else {
-                log.warn("Fichero ignorado (extension no soportada): {}", name);
+
+            if (nombre.endsWith(".csv")) {
+                procesarCsv(fichero);
+            } else if (nombre.endsWith(".enc")) {
+                procesarEnc(fichero);
+            } else if (nombre.endsWith(".zip")) {
+                procesarZip(fichero);
+            } else if (nombre.endsWith(".jpg")) {
+                procesarJpg(fichero);
             }
         } catch (Exception e) {
-            log.error("Fichero corrupto o ilegible: {} -> {}", name, e.getMessage());
-            try {
-                moveToError(file);
-            } catch (IOException ex) {
-                log.error("No se pudo mover a error: {}", name, ex);
-            }
+            log.error("Fallo al procesar {}: {}", nombre, e.getMessage());
+            moverAError(fichero);
         }
     }
 
-    private void moveToError(Path file) throws IOException {
-        String name = file.getFileName().toString();
-        log.error("[ALERT EMAIL SENT -> soporte@aadtex.com] CRITICAL: Empty/Corrupt batch file: {}", name);
-        Files.move(file, error.resolve(name), StandardCopyOption.REPLACE_EXISTING);
+    private void moverAError(Path fichero) throws IOException {
+        String nombre = fichero.getFileName().toString();
+        log.error("[ALERT EMAIL SENT -> soporte@aadtex.com] CRITICAL: Empty/Corrupt batch file: {}", nombre);
+        Files.move(fichero, error.resolve(nombre), StandardCopyOption.REPLACE_EXISTING);
     }
 
-    // ---------- CSV ----------
-    private void processCsv(Path file) throws IOException {
-        String name = file.getFileName().toString();
-        try (InputStream in = Files.newInputStream(file)) {
-            BigDecimal total = readCsv(in, name);
-            writeSummary(name, "csv", total);
+    private void procesarCsv(Path fichero) throws IOException {
+        String nombre = fichero.getFileName().toString();
+        BigDecimal total;
+        try (InputStream in = Files.newInputStream(fichero)) {
+            total = leerCsv(in, nombre);
         }
-        Files.move(file, processed.resolve(name), StandardCopyOption.REPLACE_EXISTING);
+        guardarResumen(nombre, total);
+        Files.move(fichero, processed.resolve(nombre), StandardCopyOption.REPLACE_EXISTING);
     }
 
-    // ---------- ENC ----------
-    private void processEnc(Path file) throws Exception {
-        String name = file.getFileName().toString();
-        byte[] encrypted = Files.readAllBytes(file);
-        byte[] plain = cryptoService.decrypt(encrypted);
-        try (InputStream in = new ByteArrayInputStream(plain)) {
-            BigDecimal total = readCsv(in, name);
-            writeSummary(name, "enc", total);
-        }
-        Files.move(file, processed.resolve(name), StandardCopyOption.REPLACE_EXISTING);
+    private void procesarEnc(Path fichero) throws Exception {
+        String nombre = fichero.getFileName().toString();
+        // leo los bytes cifrados y los descifro en memoria
+        byte[] cifrado = Files.readAllBytes(fichero);
+        byte[] descifrado = cryptoService.decrypt(cifrado);
+        BigDecimal total = leerCsv(new ByteArrayInputStream(descifrado), nombre);
+        guardarResumen(nombre, total);
+        Files.move(fichero, processed.resolve(nombre), StandardCopyOption.REPLACE_EXISTING);
     }
 
-    // ---------- ZIP ----------
-    private void processZip(Path file) throws IOException {
-        String name = file.getFileName().toString();
+    private void procesarZip(Path fichero) throws IOException {
+        String nombre = fichero.getFileName().toString();
         BigDecimal total = BigDecimal.ZERO;
-        try (ZipInputStream zis = new ZipInputStream(
-                new BufferedInputStream(Files.newInputStream(file)), StandardCharsets.UTF_8)) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                String entryName = Paths.get(entry.getName()).getFileName().toString();
-                if (entry.isDirectory()) continue;
-                if (entryName.toLowerCase().endsWith(".csv")) {
-                    // lee el CSV directamente del ZIP, sin volcar a disco
-                    total = total.add(readCsv(nonClosing(zis), name + "!" + entryName));
-                } else if (entryName.toLowerCase().endsWith(".jpg")) {
-                    // copia la firma desde el ZIP con buffer de 4 KB
-                    try (BufferedOutputStream out = new BufferedOutputStream(
-                            Files.newOutputStream(signatures.resolve(entryName)))) {
-                        byte[] buffer = new byte[BUFFER_SIZE];
-                        int read;
-                        while ((read = zis.read(buffer)) != -1) {
-                            out.write(buffer, 0, read);
-                        }
-                    }
-                    log.info("Firma extraida del ZIP: {}", entryName);
+        try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(fichero))) {
+            ZipEntry entrada;
+            while ((entrada = zip.getNextEntry()) != null) {
+                String nombreEntrada = entrada.getName();
+                if (nombreEntrada.endsWith(".csv")) {
+                    total = total.add(leerCsv(zip, nombre + "/" + nombreEntrada));
+                } else if (nombreEntrada.endsWith(".jpg")) {
+                    copiar(zip, signatures.resolve(nombreEntrada));
+                    log.info("Firma extraida del ZIP: {}", nombreEntrada);
                 }
-                zis.closeEntry();
             }
         }
-        writeSummary(name, "zip", total);
-        Files.move(file, processed.resolve(name), StandardCopyOption.REPLACE_EXISTING);
+        guardarResumen(nombre, total);
+        Files.move(fichero, processed.resolve(nombre), StandardCopyOption.REPLACE_EXISTING);
     }
 
-    // ---------- JPG ----------
-    private void copySignature(Path file) throws IOException {
-        String name = file.getFileName().toString();
-        Path target = signatures.resolve(name);
-        try (BufferedInputStream in = new BufferedInputStream(Files.newInputStream(file), BUFFER_SIZE);
-             BufferedOutputStream out = new BufferedOutputStream(Files.newOutputStream(target), BUFFER_SIZE)) {
-            byte[] buffer = new byte[BUFFER_SIZE];
-            int read;
-            while ((read = in.read(buffer)) != -1) {
-                out.write(buffer, 0, read);
-            }
+    private void procesarJpg(Path fichero) throws IOException {
+        String nombre = fichero.getFileName().toString();
+        try (InputStream in = Files.newInputStream(fichero)) {
+            copiar(in, signatures.resolve(nombre));
         }
-        Files.delete(file);
-        log.info("Firma copiada con buffer de 4 KB: {}", name);
+        Files.delete(fichero);
+        log.info("Firma copiada con buffer de 4 KB: {}", nombre);
     }
 
-    // ---------- Utilidades ----------
-    private BigDecimal readCsv(InputStream in, String source) throws IOException {
-        BigDecimal total = BigDecimal.ZERO;
+    // lee el csv en UTF-8 y suma la columna SalesAmount
+    private BigDecimal leerCsv(InputStream in, String origen) throws IOException {
         BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-        String line = reader.readLine(); // cabecera
-        if (line == null) throw new IOException("CSV sin contenido");
-        while ((line = reader.readLine()) != null) {
-            if (line.isBlank()) continue;
-            String[] cols = line.split(",");
-            if (cols.length < 5) throw new IOException("Linea invalida: " + line);
-            total = total.add(new BigDecimal(cols[2].trim()));
-            log.info("[{}] {} | {} | {} | {}", source, cols[0], cols[1], cols[2], cols[3]);
+        BigDecimal total = BigDecimal.ZERO;
+        String linea = reader.readLine(); // salto la cabecera
+        while ((linea = reader.readLine()) != null) {
+            if (linea.isBlank()) {
+                continue;
+            }
+            String[] campos = linea.split(",");
+            total = total.add(new BigDecimal(campos[2]));
+            log.info("[{}] {} | {} | {} | {}", origen, campos[0], campos[1], campos[2], campos[3]);
         }
-        log.info("[{}] Importe total del lote: {}", source, total);
+        log.info("[{}] Importe total del lote: {}", origen, total);
         return total;
     }
 
-    private InputStream nonClosing(InputStream in) {
-        return new FilterInputStream(in) {
-            @Override
-            public void close() { /* no cerrar el ZipInputStream */ }
-        };
+    // copia binaria con buffer de 4 KB
+    private void copiar(InputStream origen, Path destino) throws IOException {
+        BufferedInputStream entrada = new BufferedInputStream(origen);
+        try (BufferedOutputStream salida = new BufferedOutputStream(Files.newOutputStream(destino))) {
+            byte[] buffer = new byte[4096];
+            int leidos;
+            while ((leidos = entrada.read(buffer)) != -1) {
+                salida.write(buffer, 0, leidos);
+            }
+        }
     }
 
-    private void writeSummary(String source, String type, BigDecimal total) throws IOException {
-        batchCounter++;
+    private void guardarResumen(String origen, BigDecimal total) throws IOException {
+        contador++;
         String json = "{\n"
-                + "  \"batchId\": " + batchCounter + ",\n"
-                + "  \"sourceFile\": \"" + source.replace("\"", "'") + "\",\n"
-                + "  \"type\": \"" + type + "\",\n"
+                + "  \"batchId\": " + contador + ",\n"
+                + "  \"sourceFile\": \"" + origen + "\",\n"
                 + "  \"totalSales\": " + total.toPlainString() + "\n"
                 + "}\n";
-        Path out = bucketService.upload("summary_batch_" + batchCounter + ".json", json);
-        log.info("Resumen JSON publicado: {}", out);
+        Path ruta = bucketService.guardar("summary_batch_" + contador + ".json", json);
+        log.info("Resumen JSON publicado: {}", ruta);
     }
 }

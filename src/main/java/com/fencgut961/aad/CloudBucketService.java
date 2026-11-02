@@ -1,6 +1,5 @@
 package com.fencgut961.aad;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -12,16 +11,13 @@ import java.nio.file.Paths;
 @Service
 public class CloudBucketService {
 
-    private final Path bucketPath;
+    // carpeta que simula el bucket en la nube
+    private final Path carpeta = Paths.get("workspace/store_data/output/bucket/aadtex-daily-reports/2026/09");
 
-    public CloudBucketService(@Value("${store.base-path:workspace/store_data}") String basePath) {
-        this.bucketPath = Paths.get(basePath, "output", "bucket", "aadtex-daily-reports", "2026", "09");
-    }
-
-    public Path upload(String fileName, String json) throws IOException {
-        Files.createDirectories(bucketPath);
-        Path target = bucketPath.resolve(fileName);
-        Files.writeString(target, json, StandardCharsets.UTF_8);
-        return target;
+    public Path guardar(String nombre, String json) throws IOException {
+        Files.createDirectories(carpeta);
+        Path destino = carpeta.resolve(nombre);
+        Files.writeString(destino, json, StandardCharsets.UTF_8);
+        return destino;
     }
 }

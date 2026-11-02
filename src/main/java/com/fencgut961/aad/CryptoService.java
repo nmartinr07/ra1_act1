@@ -1,6 +1,5 @@
 package com.fencgut961.aad;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.crypto.Cipher;
@@ -10,24 +9,20 @@ import java.nio.charset.StandardCharsets;
 @Service
 public class CryptoService {
 
-    private static final String ALGORITHM = "AES/ECB/PKCS5Padding";
+    // la clave tiene 16 caracteres = AES de 128 bits
+    private static final String CLAVE = "AadTexSecret2026";
 
-    private final SecretKeySpec keySpec;
-
-    public CryptoService(@Value("${store.aes-key:AadTexSecret2026}") String key) {
-        // AES-128 = clave de 16 bytes. "AadTexSecret2026" tiene exactamente 16 caracteres.
-        this.keySpec = new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "AES");
+    public byte[] encrypt(byte[] datos) throws Exception {
+        SecretKeySpec key = new SecretKeySpec(CLAVE.getBytes(StandardCharsets.UTF_8), "AES");
+        Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
+        cipher.init(Cipher.ENCRYPT_MODE, key);
+        return cipher.doFinal(datos);
     }
 
-    public byte[] encrypt(byte[] plain) throws Exception {
-        Cipher cipher = Cipher.getInstance(ALGORITHM);
-        cipher.init(Cipher.ENCRYPT_MODE, keySpec);
-        return cipher.doFinal(plain);
-    }
-
-    public byte[] decrypt(byte[] encrypted) throws Exception {
-        Cipher cipher = Cipher.getInstance(ALGORITHM);
-        cipher.init(Cipher.DECRYPT_MODE, keySpec);
-        return cipher.doFinal(encrypted);
+    public byte[] decrypt(byte[] datos) throws Exception {
+        SecretKeySpec key = new SecretKeySpec(CLAVE.getBytes(StandardCharsets.UTF_8), "AES");
+        Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
+        cipher.init(Cipher.DECRYPT_MODE, key);
+        return cipher.doFinal(datos);
     }
 }
